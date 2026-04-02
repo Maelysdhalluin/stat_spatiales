@@ -26,6 +26,19 @@ library(sf)
 ```{r, eval=FALSE}
 # Condition simple
 df %>% filter(dep == "35")
+# Commence par "35"
+df %>% filter(startsWith(dep, "35"))
+
+# Finit par "35"
+df %>% filter(endsWith(dep, "35"))
+
+# Avec stringr (plus flexible)
+df %>% filter(str_starts(dep, "35"))
+df %>% filter(str_ends(dep, "35"))
+
+# Ou avec grepl (expression régulière)
+df %>% filter(grepl("^35", dep))  # commence par 35
+df %>% filter(grepl("35$", dep))  # finit par 35
 
 # Condition numérique
 df %>% filter(pop > 10000)

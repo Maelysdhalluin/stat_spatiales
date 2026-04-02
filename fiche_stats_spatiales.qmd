@@ -1,0 +1,688 @@
+---
+title: "Fiche de révision - Statistique Spatiale"
+format:
+  pdf:
+    documentclass: article
+    toc: true
+    toc-depth: 3
+    number-sections: true
+lang: fr
+fontsize: 10pt
+papersize: a4
+geometry: top=1.5cm, bottom=1.5cm, left=2cm, right=2cm
+---
+
+# Packages à charger
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(sf)
+library(mapsf)
+library(classInt)
+library(leaflet)
+library(openxlsx)
+library(spdep)
+library(RColorBrewer)
+library(DBI)
+library(RPostgres)
+library(dbplyr)
+```
+
+---
+
+# TP2 - Package `sf` : manipulation d'objets spatiaux
+
+## Import / Export
+
+```{r, eval=FALSE}
+# Lire un fichier spatial (gpkg, shp, geojson...)
+mon_sf <- st_read("chemin/vers/fichier.gpkg")
+
+# Sauvegarder un objet sf
+st_write(mon_sf, "chemin/vers/sortie.gpkg")
+# Si le fichier existe déjà, ajouter delete_dsn=TRUE pour écraser
+st_write(mon_sf, "sortie.gpkg", delete_dsn = TRUE)
+
+# Lire un CSV avec coordonnées et le transformer en sf
+mon_df <- read.csv("fichier.csv", sep = ";")
+mon_sf <- st_as_sf(mon_df,
+  coords = c("nom_col_x", "nom_col_y"), # colonnes longitude, latitude
+  crs = 2154  # EPSG du système de projection d'origine
+)
+```
+
+## Exploration d'un objet sf
+
+```{r, eval=FALSE}
+# Résumé général (comme un data.frame)
+summary(mon_sf)
+
+# Premières lignes (la colonne geometry est toujours présente)
+head(mon_sf, 10)
+
+# Vérifier que c'est bien un objet sf
+class(mon_sf)   # doit retourner "sf" "data.frame"
+is.data.frame(mon_sf)  # TRUE : un sf EST un data.frame
+
+# Afficher le système de projection (CRS)
+st_crs(mon_sf)
+# Récupérer uniquement le code EPSG
+st_crs(mon_sf)$epsg
+```
+
+## Sélection et filtrage
+
+```{r, eval=FALSE}
+# Filtrer des lignes (la geometry suit automatiquement)
+communes_bretagne <- mon_sf %>% filter(dep == "35")
+
+# Sélectionner des colonnes (la geometry est conservée même si non sélectionnée)
+communes_bretagne <- communes_bretagne %>%
+  select(code, libelle, dep, surf)
+
+# Supprimer la geometry → devient un data.frame classique
+df_sans_geo <- st_drop_geometry(mon_sf)
+```
+
+## Systèmes de projection
+
+```{r, eval=FALSE}
+# Reprojeter dans un autre CRS
+# Lambert-93 = EPSG 2154 (métrique, adapté à la France, pour les calculs de distance/surface)
+# WGS84     = EPSG 4326 (degrés, requis pour leaflet et certaines APIs)
+
+mon_sf_lambert <- st_transform(mon_sf, crs = 2154)
+mon_sf_wgs84   <- st_transform(mon_sf, crs = 4326)
+
+# Affecter un CRS (quand aucun n'est défini, ne reprojette pas)
+st_crs(mon_sf) <- 2154
+```
+
+## Calcul de surfaces
+
+```{r, eval=FALSE}
+# Calcul de la surface (unité dépend du CRS : m² si Lambert-93)
+mon_sf$surf_m2 <- st_area(mon_sf)
+
+# Convertir en km²
+mon_sf$surf_km2 <- as.numeric(st_area(mon_sf)) / 1e6
+
+# Attention : st_area() retourne un objet "units", as.numeric() retire l'unité
+```
+
+## Centroïdes et coordonnées
+
+```{r, eval=FALSE}
+# Calculer les centroïdes (retourne un sf de type POINT)
+centroides <- st_centroid(mon_sf)
+
+# Récupérer les coordonnées (X, Y) dans un data.frame
+coords <- st_coordinates(centroides)
+# coords est une matrice avec colonnes X et Y
+
+# Combiner coords avec des attributs du sf
+resultat <- bind_cols(
+  st_drop_geometry(centroides),  # attributs sans geometry
+  as.data.frame(coords)           # coordonnées X, Y
+)
+```
+
+## Agrégation spatiale (dissoudre des polygones)
+
+```{r, eval=FALSE}
+# Agréger des communes en départements avec union des geometries
+dept <- communes_sf %>%
+  group_by(dep) %>%
+  summarise(
+    surf_totale = sum(surf_km2),  # agrégation numérique
+    geometry = st_union(geometry) # fusion des polygones
+  )
+
+# Alternative courte (summarise() appelle st_union automatiquement)
+dept <- communes_sf %>%
+  group_by(dep) %>%
+  summarise(surf_totale = sum(surf_km2))
+```
+
+## Relations spatiales (prédicats)
+
+```{r, eval=FALSE}
+# st_intersects : retourne une liste d'indices (voisins, intersections)
+# Résultat : pour chaque élément de x, les indices de y qui l'intersectent
+result <- st_intersects(x = centroides, y = communes_sf)
+
+# st_intersection : retourne un sf avec les géométries intersectées (coupe les polygones)
+communes_dans_buffer <- st_intersection(communes_sf, mon_buffer)
+
+# st_within : retourne une liste d'indices (comme intersects mais strictement contenu)
+result <- st_within(points_sf, polygones_sf)
+
+# st_contains : l'inverse de st_within (quels polygones contiennent chaque point)
+result <- st_contains(polygones_sf, points_sf)
+
+# Utiliser le résultat d'un prédicat pour filtrer
+indices <- st_within(points_sf, zone_sf, sparse = FALSE)
+# sparse=FALSE → retourne une matrice logique au lieu d'une liste
+points_dans_zone <- points_sf[as.vector(indices), ]
+```
+
+## Distance et buffer
+
+```{r, eval=FALSE}
+# Distance entre deux sf (retourne une matrice de distances en mètres si CRS métrique)
+dist_mat <- st_distance(sf1, sf2)
+
+# Buffer (zone tampon autour des géométries)
+# dist en mètres si CRS = Lambert-93
+buffer_20km <- st_buffer(centroides, dist = 20000)
+
+# Attention : avec CRS = WGS84, la distance est en degrés !
+# Toujours reprojeter en Lambert-93 avant de créer un buffer en mètres
+```
+
+## Visualisation basique avec `plot()`
+
+```{r, eval=FALSE}
+# Afficher toutes les colonnes (une carte par variable)
+plot(mon_sf)
+
+# Afficher uniquement la géométrie (contours)
+plot(st_geometry(mon_sf), lwd = 0.5)
+
+# Afficher une seule variable
+plot(mon_sf["ma_variable"])
+
+# Superposer deux couches (add=TRUE sur la 2e)
+plot(st_geometry(polygones_sf))
+plot(st_geometry(points_sf), add = TRUE, col = "red", pch = 16)
+
+# Ajouter du texte sur la carte
+text(
+  x = coords$X,
+  y = coords$Y,
+  labels = mon_sf$nom_colonne,
+  cex = 0.7  # taille du texte
+)
+
+# Discrétisation avec plot()
+plot(mon_sf["densite"], breaks = "quantile")  # méthodes: quantile, jenks, sd, pretty, equal
+plot(mon_sf["densite"], breaks = "jenks", border = FALSE)
+```
+
+## Jointure attributaire et spatiale
+
+```{r, eval=FALSE}
+# Jointure attributaire classique (comme un data.frame)
+mon_sf <- mon_sf %>%
+  left_join(mon_df, by = c("code" = "CODGEO"))
+
+# Jointure spatiale : associe chaque point au polygone qui le contient
+resultat <- st_join(points_sf, polygones_sf)
+
+# st_join utilise st_intersects par défaut
+# On peut changer : join = st_within, join = st_nearest_feature ...
+```
+
+---
+
+# TP3 - Cartographie avec `mapsf`, `classInt` et `leaflet`
+
+## Discrétisation avec `classInt`
+
+```{r, eval=FALSE}
+# Créer une discrétisation et analyser les classes
+decoupe <- classIntervals(
+  var    = mon_sf$ma_variable,
+  style  = "quantile",  # méthodes : "quantile", "jenks", "sd", "pretty", "equal", "fixed"
+  n      = 5            # nombre de classes
+)
+
+# Avec des bornes manuelles (style = "fixed")
+decoupe_manuelle <- classIntervals(
+  var    = mon_sf$densite,
+  style  = "fixed",
+  fixedBreaks = c(0, 40, 162, 1000, 8000, 27200)
+)
+
+# Visualiser la distribution + les coupures
+plot(decoupe, pal = RColorBrewer::brewer.pal(5, "YlOrRd"), main = "Quantiles")
+
+# Ajouter la variable discrétisée au sf avec cut()
+mon_sf$var_disc <- cut(
+  mon_sf$ma_variable,
+  breaks         = decoupe$brks, # bornes issues de classIntervals
+  include.lowest = TRUE,         # inclure la borne inférieure
+  right          = FALSE         # intervalles fermés à gauche [a, b)
+)
+```
+
+## Palettes de couleurs
+
+```{r, eval=FALSE}
+# Palettes RColorBrewer
+pal <- RColorBrewer::brewer.pal(n = 5, name = "YlOrRd")
+# Autres palettes utiles : "Blues", "Reds", "RdYlBu", "RdYlGn", "Spectral"
+
+# Inverser une palette
+pal_inv <- rev(pal)
+
+# Voir toutes les palettes disponibles
+RColorBrewer::display.brewer.all()
+
+# Palette continue hcl (pour cartes avec beaucoup de classes)
+pal_hcl <- hcl.colors(n = 6, palette = "Red-Blue", rev = TRUE)
+```
+
+## Cartographie statique avec `mapsf`
+
+```{r, eval=FALSE}
+# Carte choroplèthe (variable continue ou discrète)
+mf_map(
+  x    = mon_sf,
+  var  = "ma_variable",
+  type = "choro",
+  breaks = "quantile",    # ou vecteur de bornes numériques
+  nbreaks = 5,
+  pal  = "YlOrRd",
+  border = "white",
+  lwd  = 0.3,
+  leg_title = "Titre légende"
+)
+
+# Carte de ronds proportionnels (variable de stock/effectif)
+mf_map(
+  x    = mon_sf,
+  var  = "population",
+  type = "prop",
+  inches = 0.15,          # taille max des ronds
+  leg_title = "Population"
+)
+
+# Carte choroplèthe + ronds proportionnels combinés
+mf_map(
+  x    = mon_sf,
+  var  = c("densite", "population"),  # 1er = choro, 2e = prop
+  type = "prop_choro",
+  breaks = "quantile",
+  nbreaks = 5,
+  pal  = "YlOrRd"
+)
+
+# Ajouter un titre, une source, un auteur
+mf_title("Titre de la carte")
+mf_credits("Source : INSEE, 2021")
+
+# Ajouter un encart (zoom sur une zone)
+mf_inset_on(x = zone_zoom, cex = 0.3)   # ouvre l'encart
+mf_map(zone_zoom, type = "choro", var = "ma_variable", breaks = bornes, pal = "YlOrRd",
+       add = TRUE)                         # add=TRUE pour superposer
+mf_inset_off()                            # ferme l'encart
+```
+
+## Cartographie interactive avec `leaflet`
+
+```{r, eval=FALSE}
+# Initialiser une carte et la centrer
+carte <- leaflet() %>%
+  setView(lng = 2.35, lat = 48.85, zoom = 10) %>%  # lng/lat en WGS84
+  addTiles()  # fond de carte OpenStreetMap par défaut
+
+# IMPORTANT : leaflet nécessite des données en WGS84 (EPSG 4326)
+mon_sf_wgs84 <- st_transform(mon_sf, 4326)
+
+# Ajouter des marqueurs ponctuels
+carte <- carte %>%
+  addMarkers(
+    data  = points_sf,            # sf de type POINT en WGS84
+    popup = ~nom_colonne          # texte affiché au clic (~ = formule)
+  )
+
+# Popup avec mise en forme HTML
+mon_sf$popup <- paste0(
+  "<b>", mon_sf$libelle, "</b>",
+  "<br>Population : ", format(mon_sf$pop, big.mark = " "),
+  "<br>Part moins de 15 ans : ", round(mon_sf$part_jeunes, 1), "%"
+)
+
+# Ajouter des polygones
+carte <- carte %>%
+  addPolygons(
+    data        = polygones_wgs84,
+    weight      = 1,          # épaisseur des bordures
+    color       = "grey",     # couleur des bordures
+    fillColor   = ~pal(ma_variable),  # couleur de remplissage (palette)
+    fillOpacity = 0.7,
+    popup       = ~popup
+  )
+
+# Créer une palette pour leaflet (discrétisation)
+pal <- colorQuantile(
+  palette = "YlOrRd",
+  domain  = mon_sf$ma_variable,
+  n       = 5
+)
+# Autres fonctions de palette : colorNumeric, colorBin, colorFactor
+
+# Ajouter une légende
+carte <- carte %>%
+  addLegend(
+    pal      = pal,
+    values   = mon_sf$ma_variable,
+    position = "bottomright",
+    title    = "Titre légende"
+  )
+
+# Gestion des couches (groupes)
+carte <- leaflet() %>%
+  addTiles() %>%
+  addPolygons(data = polygones_wgs84, group = "Communes") %>%
+  addMarkers(data = points_wgs84, group = "Equipements") %>%
+  addLayersControl(
+    overlayGroups = c("Communes", "Equipements"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+
+# Fond de carte alternatif
+carte <- carte %>%
+  addProviderTiles(providers$CartoDB.DarkMatter,
+                   options = providerTileOptions(opacity = 0.4))
+
+# Buffer simple pour leaflet (cercle visuel, non métrique)
+carte <- carte %>%
+  addCircles(lat = 48.84864, lng = 2.34297, weight = 1, radius = 1000)
+```
+
+---
+
+# TP4 - Autocorrélation spatiale avec `spdep`
+
+## Principe général
+
+L'autocorrélation spatiale mesure si les valeurs d'une variable ont tendance à être similaires (autocorrélation **positive**) ou différentes (autocorrélation **négative**) entre unités géographiques voisines.
+
+**Étapes clés :**
+
+1. Définir le voisinage (matrice de contiguïté)
+2. Transformer en liste de pondérations
+3. Calculer le diagramme de Moran (visuel)
+4. Calculer et tester l'indice I de Moran (global)
+5. (Bonus) Calculer les LISA pour l'autocorrélation locale
+
+## Standardisation d'une variable
+
+```{r, eval=FALSE}
+# Centrer-réduire une variable (moyenne = 0, écart-type = 1)
+mon_sf$var_std <- scale(mon_sf$ma_variable) %>% as.numeric()
+
+# Vérification
+mean(mon_sf$var_std, na.rm = TRUE)  # doit être ~0
+sd(mon_sf$var_std, na.rm = TRUE)    # doit être ~1
+```
+
+## Matrice de voisinage (contiguïté)
+
+```{r, eval=FALSE}
+# Construire la liste des voisins par contiguïté
+# Queen : voisins si ils partagent un bord OU un coin (par défaut)
+# Rook  : voisins uniquement s'ils partagent un bord (queen = FALSE)
+voisins <- poly2nb(mon_sf, queen = TRUE)
+
+# Résumé de la liste de voisins
+summary(voisins)
+
+# Voir les voisins du 4e élément
+voisins[[4]]
+
+# Visualiser le graphe de voisinage
+coords <- st_coordinates(st_centroid(mon_sf))
+plot(st_geometry(mon_sf), border = "grey")
+plot(voisins, coords, add = TRUE, col = "red")
+```
+
+## Liste de pondérations
+
+```{r, eval=FALSE}
+# Transformer la liste de voisins en pondérations (style "W" = row-standardized)
+# Chaque voisin reçoit un poids = 1/nombre_de_voisins
+# zero.policy=TRUE pour gérer les entités sans voisins (îles, etc.)
+ponderation <- nb2listw(voisins, style = "W", zero.policy = TRUE)
+
+# Vérifier la structure
+str(ponderation, max.level = 1)
+summary(ponderation)
+
+# Vérifier que les poids somment à 1 par entité
+# La somme des poids du 1er élément doit valoir 1
+sum(ponderation$weights[[1]])
+```
+
+## Diagramme de Moran (visuel)
+
+```{r, eval=FALSE}
+# Diagramme de Moran : variable centrée-réduite (axe x) vs moyenne des voisins (axe y)
+# La pente de la droite de régression = I de Moran
+moran.plot(
+  x     = as.numeric(mon_sf$var_std),
+  listw = ponderation,
+  xlab  = "Variable centrée-réduite",
+  ylab  = "Moyenne des voisins"
+)
+# 4 cadrans :
+# ++ (HH) : valeur haute entourée de valeurs hautes → cluster positif
+# -- (LL) : valeur basse entourée de valeurs basses → cluster positif
+# +- (HL) : valeur haute entourée de valeurs basses → outlier spatial
+# -+ (LH) : valeur basse entourée de valeurs hautes → outlier spatial
+```
+
+## I de Moran global
+
+```{r, eval=FALSE}
+# Calcul et test du I de Moran
+# H0 : pas d'autocorrélation spatiale (distribution aléatoire)
+# randomisation=TRUE : compare à des permutations aléatoires
+test_moran <- moran.test(
+  x             = as.numeric(mon_sf$var_std),
+  listw         = ponderation,
+  randomisation = TRUE,
+  zero.policy   = TRUE
+)
+print(test_moran)
+
+# I de Moran ∈ [-1, 1]
+#  > 0 : autocorrélation positive (voisins similaires)
+#  < 0 : autocorrélation négative (voisins différents)
+#  ~ 0 : pas d'autocorrélation
+# p-valeur < 0.05 → autocorrélation significative
+```
+
+## LISA - I de Moran locaux (bonus)
+
+```{r, eval=FALSE}
+# Calculer les LISA (indicateurs locaux d'autocorrélation)
+lisa <- localmoran(
+  x           = as.numeric(mon_sf$var_std),
+  listw       = ponderation,
+  zero.policy = TRUE
+)
+
+# lisa est une matrice avec colonnes :
+# Ii     = valeur du LISA local
+# E.Ii   = espérance
+# Var.Ii = variance
+# Z.Ii   = valeur z standardisée
+# Pr(z)  = p-valeur
+
+# Ajouter les LISA et leur p-valeur au sf
+mon_sf$LISA      <- lisa[, "Ii"]
+mon_sf$LISA_PVAL <- lisa[, "Pr(z != E(Ii))"]
+
+# La moyenne des LISA = I de Moran global
+mean(mon_sf$LISA)
+
+# Iris avec autocorrélation significative (seuil 5%)
+sum(mon_sf$LISA_PVAL < 0.05, na.rm = TRUE)
+
+# Visualiser les LISA
+pal_lisa <- rev(RColorBrewer::brewer.pal(8, "RdYlBu"))
+plot(mon_sf["LISA"],
+     breaks = c(-8.5, -1.2, -0.7, -0.1, 0, 0.1, 0.7, 1.2, 8.5),
+     pal    = pal_lisa,
+     main   = "LISA - I de Moran locaux")
+
+# Visualiser la significativité des LISA
+plot(mon_sf["LISA_PVAL"],
+     breaks = c(0, 0.01, 0.05, 0.1, 1),
+     main   = "P-valeur des LISA")
+```
+
+---
+
+# TP5 - PostGIS et `DBI`
+
+## Connexion à PostgreSQL / PostGIS
+
+```{r, eval=FALSE}
+# Se connecter à une base PostgreSQL
+conn <- DBI::dbConnect(
+  drv      = RPostgres::Postgres(),
+  dbname   = "nom_base",
+  user     = "utilisateur",
+  password = "mot_de_passe",
+  host     = "url_ou_ip_serveur",
+  port     = 5432
+)
+
+# Lister les tables disponibles
+DBI::dbListTables(conn)
+
+# Lister les colonnes d'une table
+DBI::dbListFields(conn, "nom_table")
+
+# Fermer la connexion (bonne pratique)
+DBI::dbDisconnect(conn)
+```
+
+## Requêtes SQL avec `DBI`
+
+```{r, eval=FALSE}
+# dbGetQuery : exécute et récupère directement un data.frame
+df <- DBI::dbGetQuery(conn, "SELECT * FROM ma_table")
+
+# Avec filtre WHERE
+rennes <- DBI::dbGetQuery(conn, "SELECT * FROM popnaiss_com WHERE CODGEO = '35238'")
+
+# Jointure SQL
+jointure <- DBI::dbGetQuery(conn, "
+  SELECT b.*, p.naissances
+  FROM bpe21_metro b
+  INNER JOIN popnaiss_com p ON b.depcom = p.codgeo
+  WHERE b.depcom = '35047'
+")
+
+# dbSendQuery : envoie la requête sans récupérer (retourne un Result)
+res <- DBI::dbSendQuery(conn, "SELECT * FROM ma_table")
+df  <- DBI::dbFetch(res)       # récupère les données
+DBI::dbClearResult(res)        # libère la ressource (IMPORTANT)
+```
+
+## Requêtes spatiales avec `sf::st_read()`
+
+```{r, eval=FALSE}
+# Lire une table spatiale depuis PostGIS → retourne directement un objet sf
+mon_sf <- sf::st_read(conn, query = "SELECT * FROM bpe21_metro WHERE typequ = 'F303'")
+
+# st_read gère automatiquement la colonne geometry
+# L'argument s'appelle query= (et non statement= comme dans DBI)
+
+# Identifier le CRS d'une table PostGIS avec ST_SRID
+crs_info <- DBI::dbGetQuery(conn, "SELECT ST_SRID(GEOMETRY) FROM ma_table LIMIT 1")
+```
+
+## Utiliser `dbplyr` (syntaxe dplyr sur SQL)
+
+```{r, eval=FALSE}
+# Créer une référence à une table distante (ne télécharge pas les données)
+ma_table_distante <- tbl(conn, "nom_table")
+
+# Appliquer des verbes dplyr (la requête SQL est construite à la volée)
+resultat <- ma_table_distante %>%
+  filter(DEP == "35") %>%
+  select(CODGEO, DEPCOM, TYPEQU) %>%
+  collect()  # collect() exécute la requête et ramène les données en local
+
+# Voir la requête SQL générée
+ma_table_distante %>%
+  filter(DEP == "35") %>%
+  show_query()
+```
+
+## Fonctions PostGIS en SQL
+
+```{r, eval=FALSE}
+# ST_SRID : récupère le code EPSG d'une géométrie
+"SELECT ST_SRID(geometry) FROM ma_table LIMIT 1"
+
+# ST_Contains : quels polygones contiennent un point
+"SELECT * FROM regions WHERE ST_Contains(geometry, mon_point)"
+
+# ST_Within : quel point est dans quel polygone
+"SELECT * FROM points WHERE ST_Within(geometry, mon_polygone)"
+
+# ST_Buffer : créer une zone tampon (distance en mètres si CRS métrique)
+"SELECT ST_Buffer(geometry, 1000) FROM ma_table"
+
+# ST_Distance : distance entre deux géométries
+"SELECT ST_Distance(a.geometry, b.geometry) FROM table_a a, table_b b"
+
+# ST_Transform : reprojection
+"SELECT ST_Transform(geometry, 4326) FROM ma_table"
+```
+
+## Isochrones avec `osrm`
+
+```{r, eval=FALSE}
+# Calculer des isochrones autour d'un point (en WGS84)
+# coords = vecteur c(longitude, latitude) en WGS84
+iso <- osrm::osrmIsochrone(
+  loc    = c(2.34297, 48.84864),  # longitude, latitude
+  breaks = seq(0, 60, 10),         # isochrones en minutes : 0, 10, 20, ...60
+  res    = 100                      # résolution (res² points pour dessiner les courbes)
+)
+# iso est un sf avec colonnes isomin et isomax
+```
+
+---
+
+# Rappels généraux
+
+## Systèmes de projection courants
+
+| EPSG | Nom            | Unité  | Usage principal                     |
+|------|----------------|--------|-------------------------------------|
+| 2154 | Lambert-93     | mètres | France métropolitaine (calculs)     |
+| 4326 | WGS84          | degrés | GPS, leaflet, APIs web              |
+| 3857 | Web Mercator   | mètres | Fonds de carte web (Google, OSM...) |
+
+## Récapitulatif des fonctions `sf`
+
+| Fonction            | Rôle                                               |
+|---------------------|----------------------------------------------------|
+| `st_read()`         | Lire un fichier spatial                            |
+| `st_write()`        | Écrire un fichier spatial                          |
+| `st_crs()`          | Afficher ou modifier le CRS                        |
+| `st_transform()`    | Reprojeter                                         |
+| `st_geometry()`     | Extraire la colonne geometry                       |
+| `st_area()`         | Calculer la surface                                |
+| `st_centroid()`     | Calculer les centroïdes                            |
+| `st_coordinates()`  | Extraire les coordonnées (X, Y) en data.frame      |
+| `st_buffer()`       | Créer une zone tampon                              |
+| `st_distance()`     | Calculer des distances                             |
+| `st_union()`        | Fusionner des géométries                           |
+| `st_intersects()`   | Prédicat spatial (liste d'indices)                 |
+| `st_intersection()` | Intersection géométrique (coupe les polygones)     |
+| `st_within()`       | Prédicat : x est-il contenu dans y ?               |
+| `st_contains()`     | Prédicat : y contient-il x ?                       |
+| `st_join()`         | Jointure spatiale                                  |
+| `st_as_sf()`        | Convertir un data.frame en sf                      |
+| `st_drop_geometry()`| Supprimer la geometry → data.frame                 |
+| `is.na()` sur geom  | Détecter les géométries manquantes                 |

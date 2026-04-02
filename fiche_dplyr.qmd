@@ -1,0 +1,397 @@
+---
+title: "Fiche de révision - dplyr (orientée stats spatiales)"
+format:
+  pdf:
+    documentclass: article
+    toc: true
+    toc-depth: 3
+    number-sections: true
+lang: fr
+fontsize: 10pt
+papersize: a4
+geometry: top=1.5cm, bottom=1.5cm, left=2cm, right=2cm
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(sf)
+```
+
+---
+
+# Verbes essentiels de `dplyr`
+
+## `filter()` — Filtrer des lignes
+
+```{r, eval=FALSE}
+# Condition simple
+df %>% filter(dep == "35")
+
+# Condition numérique
+df %>% filter(pop > 10000)
+
+# Plusieurs conditions (ET implicite)
+df %>% filter(dep == "35", pop > 1000)
+
+# OU explicite
+df %>% filter(dep == "35" | dep == "56")
+
+# Appartenance à un ensemble
+df %>% filter(dep %in% c("35", "56", "22", "29"))
+
+# Exclure des valeurs
+df %>% filter(!dep %in% c("75", "92", "93", "94"))
+
+# Valeurs non manquantes
+df %>% filter(!is.na(ma_variable))
+
+# Combinaison avec objet sf : la geometry suit automatiquement
+mon_sf %>% filter(dep == "35")
+```
+
+## `select()` — Sélectionner des colonnes
+
+```{r, eval=FALSE}
+# Sélectionner des colonnes nommées
+df %>% select(code, libelle, pop)
+
+# Exclure une colonne
+df %>% select(-colonne_inutile)
+
+# Sélectionner une plage de colonnes
+df %>% select(col1:col5)
+
+# Renommer en sélectionnant
+df %>% select(code = CODGEO, nom = LIBELLE)
+
+# Sélectionner par pattern (colonnes dont le nom commence par "POP")
+df %>% select(starts_with("POP"))
+df %>% select(ends_with("2019"))
+df %>% select(contains("med"))
+
+# Avec sf : la colonne geometry est toujours conservée
+mon_sf %>% select(code, libelle)
+```
+
+## `mutate()` — Créer ou modifier des colonnes
+
+```{r, eval=FALSE}
+# Créer une nouvelle variable
+df %>% mutate(densite = pop / surf_km2)
+
+# Modifier une variable existante
+df %>% mutate(pop = pop / 1000)  # en milliers
+
+# Plusieurs variables à la fois
+df %>% mutate(
+  densite      = pop / surf_km2,
+  log_densite  = log(densite),
+  part_jeunes  = pop_jeunes / pop * 100
+)
+
+# Avec conditions (if_else, case_when)
+df %>% mutate(
+  categorie = if_else(densite > 100, "dense", "peu dense")
+)
+
+df %>% mutate(
+  categorie = case_when(
+    densite > 1000 ~ "très dense",
+    densite > 100  ~ "dense",
+    densite > 40   ~ "intermédiaire",
+    TRUE           ~ "peu dense"     # TRUE = cas par défaut (else)
+  )
+)
+
+# Discrétiser une variable avec cut()
+df %>% mutate(
+  var_disc = cut(
+    ma_variable,
+    breaks         = c(0, 40, 162, 1000, 8000, Inf),
+    include.lowest = TRUE,   # inclure la borne inférieure
+    right          = FALSE,  # intervalles [a, b) fermés à gauche
+    labels         = c("0-40", "40-162", "162-1000", "1000-8000", ">8000")
+  )
+)
+```
+
+## `rename()` — Renommer des colonnes
+
+```{r, eval=FALSE}
+# Syntaxe : nouveau_nom = ancien_nom
+df %>% rename(code = CODGEO, libelle = LIBELLE)
+```
+
+## `arrange()` — Trier les lignes
+
+```{r, eval=FALSE}
+# Tri croissant
+df %>% arrange(pop)
+
+# Tri décroissant
+df %>% arrange(desc(pop))
+
+# Tri sur plusieurs colonnes
+df %>% arrange(dep, desc(pop))
+```
+
+## `group_by()` + `summarise()` — Agréger
+
+```{r, eval=FALSE}
+# Calculer des statistiques par groupe
+df %>%
+  group_by(dep) %>%
+  summarise(
+    pop_totale   = sum(pop, na.rm = TRUE),
+    pop_moyenne  = mean(pop, na.rm = TRUE),
+    n_communes   = n(),                    # nombre de lignes par groupe
+    surf_totale  = sum(surf_km2, na.rm = TRUE)
+  )
+
+# Avec sf : agrégation spatiale (les géométries sont unionisées)
+mon_sf %>%
+  group_by(dep) %>%
+  summarise(
+    pop_totale = sum(pop, na.rm = TRUE),
+    geometry   = st_union(geometry)  # fusionne les polygones
+  )
+
+# Raccourci : summarise() sans st_union explicite fait l'union automatiquement
+mon_sf %>%
+  group_by(dep) %>%
+  summarise(pop_totale = sum(pop, na.rm = TRUE))
+```
+
+## `count()` — Compter les occurrences
+
+```{r, eval=FALSE}
+# Compter le nombre de lignes par modalité
+df %>% count(dep)
+
+# Équivalent à
+df %>% group_by(dep) %>% summarise(n = n())
+
+# Tri décroissant
+df %>% count(dep, sort = TRUE)
+
+# Compter sur plusieurs variables
+df %>% count(dep, typequ)
+```
+
+---
+
+# Jointures avec `dplyr`
+
+## `left_join()` — Jointure à gauche (la plus courante)
+
+```{r, eval=FALSE}
+# Toutes les lignes de df1, avec les colonnes de df2 quand la clé correspond
+# Si pas de correspondance → NA dans les colonnes de df2
+resultat <- df1 %>% left_join(df2, by = "CODGEO")
+
+# Clés avec noms différents
+resultat <- df1 %>% left_join(df2, by = c("code_commune" = "CODGEO"))
+
+# Avec sf : la geometry de df1 est conservée
+mon_sf %>% left_join(mon_df, by = c("code" = "CODGEO"))
+```
+
+## Autres jointures
+
+```{r, eval=FALSE}
+# inner_join : uniquement les lignes avec correspondance dans les deux tables
+df1 %>% inner_join(df2, by = "CODGEO")
+
+# right_join : toutes les lignes de df2
+df1 %>% right_join(df2, by = "CODGEO")
+
+# full_join : toutes les lignes des deux tables
+df1 %>% full_join(df2, by = "CODGEO")
+
+# anti_join : lignes de df1 SANS correspondance dans df2 (utile pour diagnostic)
+df1 %>% anti_join(df2, by = "CODGEO")
+
+# semi_join : lignes de df1 AVEC correspondance dans df2 (mais sans coller les colonnes de df2)
+df1 %>% semi_join(df2, by = "CODGEO")
+```
+
+---
+
+# Manipulation de données fréquente dans les TPs
+
+## Regrouper des lignes (ex : arrondissements → Paris)
+
+```{r, eval=FALSE}
+# Cas TP3 : regrouper les arrondissements de Paris (75101-75120) en une seule ligne (75056)
+pop_modif <- pop_df %>%
+  mutate(CODGEO = if_else(
+    substr(CODGEO, 1, 3) == "751",  # si les 3 premiers caractères sont "751"
+    "75056",                          # remplacer par le code Paris
+    CODGEO
+  )) %>%
+  group_by(CODGEO) %>%
+  summarise(across(where(is.numeric), sum, na.rm = TRUE))
+# across() applique sum() à toutes les colonnes numériques
+```
+
+## `bind_rows()` et `bind_cols()`
+
+```{r, eval=FALSE}
+# Empiler des data.frames (ajouter des lignes)
+df_total <- bind_rows(df_nord, df_sud)
+
+# Coller des colonnes côte à côte (les deux tables doivent avoir le même nombre de lignes)
+df_complet <- bind_cols(df1, df2)
+
+# Avec sf : coller les coordonnées aux attributs
+coords <- st_coordinates(centroides)
+resultat <- bind_cols(
+  st_drop_geometry(centroides),
+  as.data.frame(coords)
+)
+```
+
+## `slice()` et variantes
+
+```{r, eval=FALSE}
+# Sélectionner des lignes par indice
+df %>% slice(1:10)      # lignes 1 à 10
+df %>% slice(1)         # première ligne uniquement
+
+# Première / dernière ligne par groupe
+df %>% group_by(dep) %>% slice_head(n = 1)
+df %>% group_by(dep) %>% slice_tail(n = 1)
+
+# Lignes avec la valeur max / min par groupe
+df %>% group_by(dep) %>% slice_max(pop, n = 1)
+df %>% group_by(dep) %>% slice_min(pop, n = 1)
+```
+
+## `pull()` — Extraire une colonne comme vecteur
+
+```{r, eval=FALSE}
+# Extraire une colonne (retourne un vecteur, pas un data.frame)
+codes <- df %>% pull(CODGEO)
+
+# Utile pour les vérifications ou passer à d'autres fonctions
+ma_variable <- mon_sf %>% pull(densite)
+```
+
+## `distinct()` — Supprimer les doublons
+
+```{r, eval=FALSE}
+# Supprimer les lignes dupliquées (toutes colonnes)
+df %>% distinct()
+
+# Supprimer les doublons sur certaines colonnes (garde la 1ère occurrence)
+df %>% distinct(dep, .keep_all = TRUE)
+```
+
+---
+
+# Fonctions utiles hors `dplyr`
+
+## Résumé statistique
+
+```{r, eval=FALSE}
+summary(df$ma_variable)   # min, Q1, médiane, moyenne, Q3, max, NA
+quantile(df$ma_var, probs = c(0.25, 0.5, 0.75))  # quantiles personnalisés
+table(df$ma_variable_discrete)  # tableau de fréquences
+```
+
+## Manipulation de chaînes de caractères
+
+```{r, eval=FALSE}
+# Extraire les n premiers caractères (utile pour les codes géo)
+substr("75056", 1, 2)   # → "75" (les 2 premiers caractères = département)
+
+# Avec stringr (souvent chargé avec tidyverse)
+stringr::str_sub("75056", 1, 2)    # idem
+stringr::str_starts("75056", "75") # TRUE/FALSE : commence par "75" ?
+stringr::str_pad("35", 3, pad = "0")  # → "035" (compléter avec des zéros)
+
+# paste0 : concaténer des chaînes (sans séparateur)
+paste0("DEP_", df$dep)
+
+# paste : concaténer avec séparateur
+paste(df$prenom, df$nom, sep = " ")
+```
+
+## Import de données
+
+```{r, eval=FALSE}
+# CSV standard
+df <- read.csv("fichier.csv", sep = ";", dec = ".", encoding = "UTF-8")
+
+# Avec readr (plus rapide, meilleure gestion des types)
+df <- readr::read_csv2("fichier.csv")  # séparateur ";" et décimale ","
+
+# Excel avec openxlsx
+df <- openxlsx::read.xlsx("fichier.xlsx", sheet = 1)
+# ou
+df <- openxlsx::read.xlsx("fichier.xlsx", sheet = "Feuil1")
+```
+
+## Permutation aléatoire
+
+```{r, eval=FALSE}
+# Permuter aléatoirement les valeurs d'une variable
+# Utile pour simuler une distribution spatiale aléatoire
+set.seed(42)  # pour reproductibilité
+ma_table$var_alea <- sample(ma_table$ma_variable)
+```
+
+## `format()` — Formater des nombres pour affichage
+
+```{r, eval=FALSE}
+# Ajouter des séparateurs de milliers
+format(1234567, big.mark = " ")   # → "1 234 567"
+
+# Arrondir et formatter
+round(12.3456, 2)    # → 12.35
+
+# Dans un popup leaflet
+paste0("Population : ", format(df$pop, big.mark = " "))
+```
+
+---
+
+# Pipeline `%>%` — Enchaîner les opérations
+
+```{r, eval=FALSE}
+# Le pipe %>% passe le résultat de gauche comme 1er argument de droite
+# Lire comme "PUIS"
+
+resultat <- communes_sf %>%              # prendre le sf des communes
+  filter(dep == "35") %>%               # garder uniquement la Bretagne (Ille-et-Vilaine)
+  select(code, libelle, dep, surf) %>%  # garder ces colonnes (+ geometry)
+  left_join(pop_df, by = c("code" = "CODGEO")) %>%  # joindre les données de population
+  mutate(densite = pop / (surf / 1e6)) %>%           # calculer la densité
+  arrange(desc(densite))                              # trier par densité décroissante
+
+# Depuis R 4.1 : pipe natif |> (equivalent à %>% dans la plupart des cas)
+resultat <- communes_sf |> filter(dep == "35")
+```
+
+---
+
+# Récapitulatif rapide
+
+| Verbe          | Action                              |
+|----------------|-------------------------------------|
+| `filter()`     | Garder des lignes selon critères    |
+| `select()`     | Garder des colonnes                 |
+| `mutate()`     | Créer/modifier des colonnes         |
+| `rename()`     | Renommer des colonnes               |
+| `arrange()`    | Trier les lignes                    |
+| `group_by()`   | Grouper pour agrégation             |
+| `summarise()`  | Calculer des statistiques par groupe|
+| `count()`      | Compter par modalité                |
+| `distinct()`   | Supprimer les doublons              |
+| `slice()`      | Sélectionner des lignes par indice  |
+| `pull()`       | Extraire une colonne en vecteur     |
+| `left_join()`  | Jointure à gauche                   |
+| `inner_join()` | Jointure interne                    |
+| `anti_join()`  | Lignes sans correspondance          |
+| `bind_rows()`  | Empiler des tables (lignes)         |
+| `bind_cols()`  | Coller des tables (colonnes)        |
